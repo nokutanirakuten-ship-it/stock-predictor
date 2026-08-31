@@ -9,18 +9,19 @@ import yfinance as yf
 from lightgbm import LGBMClassifier
 import joblib
 
-TICKERS = [
-    "7203.T",  # トヨタ自動車
-    "6758.T",  # ソニーグループ
-    "1928.T",  # 積水ハウス
-    "5401.T",  # 日本製鉄
-    "8411.T",  # みずほフィナンシャルグループ
-    "2503.T",  # キリンホールディングス
-    "8031.T",  # 三井物産
-    "8058.T",  # 三菱商事
-    "9201.T",  # 日本航空 (JAL)
-    "4901.T"   # 富士フイルムホールディングス
-]
+# 銘柄コードと日本語銘柄名のマッピング（10銘柄）
+TICKER_DICT = {
+    "7203.T": "トヨタ自動車",
+    "6758.T": "ソニーグループ",
+    "1928.T": "積水ハウス",
+    "5401.T": "日本製鉄",
+    "8411.T": "みずほフィナンシャルグループ",
+    "2503.T": "キリンホールディングス",
+    "8031.T": "三井物産",
+    "8058.T": "三菱商事",
+    "9201.T": "日本航空 (JAL)",
+    "4901.T": "富士フイルムホールディングス"
+}
 
 MODEL_PATH = "data/model.pkl"
 LOG_PATH = "data/history_log.csv"
@@ -82,7 +83,7 @@ def run_morning_prediction():
         usdjpy_series = None
 
     dfs = []
-    for ticker in TICKERS:
+    for ticker in TICKER_DICT.keys():
         df = yf.download(ticker, period="1y", progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -90,8 +91,8 @@ def run_morning_prediction():
         df = calculate_technical_indicators(df)
         df['Return'] = df['Close'].pct_change()
         
-        # ターゲットを「3日後の終値が現在より高いか」に変更（ノイズ軽減）
-        df['Target'] = (df['Close'].shift(-3) > df['Close']).astype(int)
+        # ターゲットを「翌日の終値が当日より高いか（今日の予測）」に戻す
+        df['Target'] = (df['Return'].shift(-1) > 0).astype(int)
         
         if usdjpy_series is not None:
             df['USDJPY_Return'] = usdjpy_series
@@ -114,20 +115,20 @@ def run_morning_prediction():
 
     today = datetime.now().strftime("%Y-%m-%d")
     predictions = []
-    mail_body = f"【高精度版・株価予測レポート】({today})\n\nテクニカル指標・為替連動を反映した3日後予測です。\n\n"
+    mail_body = f"【株価予測レポート】({today})\n\nテクニカル指標・為替連動を反映した本日の予測です。\n\n"
 
-    for ticker in TICKERS:
+    for ticker, name in TICKER_DICT.items():
         latest_data = df_all[df_all['Ticker'] == ticker].tail(1)
         if not latest_data.empty:
             pred = int(model.predict(latest_data[feature_cols])[0])
-            pred_text = "3日後に上がりそう (1)" if pred == 1 else "3日後に下がりそう (0)"
-            mail_body += f"・銘柄: {ticker} -> 予測: {pred_text}\n"
+            pred_text = "上がりそう (1)" if pred == 1 else "下がりそう (0)"
+            mail_body += f"・銘柄: {name} ({ticker}) -> 予測: {pred_text}\n"
             predictions.append({"Date": today, "Ticker": ticker, "Predicted": pred, "Actual": None, "Result": None})
 
     df_new_log = pd.concat([df_log, pd.DataFrame(predictions)], ignore_index=True)
     df_new_log.to_csv(LOG_PATH, index=False)
 
-    send_email(f"【朝の高度株価予測】{today}", mail_body)
+    send_email(f"【朝の株価予測】{today}", mail_body)
 
 if __name__ == "__main__":
     run_morning_prediction()
