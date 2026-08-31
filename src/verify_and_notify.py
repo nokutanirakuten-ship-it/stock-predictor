@@ -6,7 +6,20 @@ from datetime import datetime
 import pandas as pd
 import yfinance as yf
 
-TICKERS = ["7203.T", "9984.T"]
+# 100株あたり20万〜30万円前後の優良日本株10銘柄
+TICKERS = [
+    "7203.T",  # トヨタ自動車
+    "6758.T",  # ソニーグループ
+    "1928.T",  # 積水ハウス
+    "5401.T",  # 日本製鉄
+    "8411.T",  # みずほフィナンシャルグループ
+    "2503.T",  # キリンホールディングス
+    "8031.T",  # 三井物産
+    "8058.T",  # 三菱商事
+    "9201.T",  # 日本航空 (JAL)
+    "4901.T"   # 富士フイルムホールディングス
+]
+
 LOG_PATH = "data/history_log.csv"
 
 def send_email(subject, body):
