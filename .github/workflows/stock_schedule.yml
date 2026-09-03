@@ -2,10 +2,8 @@ name: Stock Prediction & Verification Schedule
 
 on:
   schedule:
-    # 日本時間 朝7:00 (UTC 22:00) 月〜金
-    - cron: '0 22 * * 0-4'
-    # 日本時間 夕方16:00 (UTC 7:00) 月〜金
-    - cron: '0 7 * * 1-5'
+    # 日本時間 月曜日 朝7:00 (UTC 日曜日 22:00)
+    - cron: '0 22 * * 0'
   workflow_dispatch:
 
 jobs:
@@ -26,25 +24,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Python based on time
+      - name: Run Prediction Script
         env:
           MAIL_USER: ${{ secrets.MAIL_USER }}
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
         run: |
-          # UTC時間を取得して朝か夕かを判定
-          CURRENT_HOUR=$(date -u +%H)
-          echo "Current UTC hour: $CURRENT_HOUR"
-          
-          if [ "$CURRENT_HOUR" -eq 22 ]; then
-            echo "Running morning prediction..."
-            python src/predict_and_notify.py
-          elif [ "$CURRENT_HOUR" -eq 7 ]; then
-            echo "Running evening verification..."
-            python src/verify_and_notify.py
-          else
-            echo "Manual or off-schedule run, running prediction as default."
-            python src/predict_and_notify.py
-          fi
+          echo "Running Monday morning prediction..."
+          python src/predict_and_notify.py
 
       - name: Commit and push changes
         run: |
