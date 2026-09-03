@@ -67,10 +67,25 @@ def calculate_technical_indicators(df):
 
 def run_morning_prediction():
     os.makedirs("data", exist_ok=True)
+    
+    # 1. 蓄積された過去の履歴ログを読み込み
     if os.path.exists(LOG_PATH):
         df_log = pd.read_csv(LOG_PATH)
     else:
         df_log = pd.DataFrame(columns=["Date", "Ticker", "Predicted", "Actual", "Result"])
+
+    # 2. 履歴データから銘柄ごとの過去の正解率（フィードバック指標）を計算
+    ticker_success_rates = {}
+    if not df_log.empty and 'Result' in df_log.columns:
+        # 「当たり！」の数をカウントして成功率を算出
+        for ticker in TICKER_DICT.keys():
+            t_df = df_log[df_log['Ticker'] == ticker]
+            valid_t_df = t_df.dropna(subset=['Result'])
+            if len(valid_t_df) > 0:
+                success_count = (valid_t_df['Result'] == "当たり！").sum()
+                ticker_success_rates[ticker] = success_count / len(valid_t_df)
+            else:
+                ticker_success_rates[ticker] = 0.5  / デフォルト値
 
     # マクロ指標（ドル円）の取得
     try:
@@ -90,9 +105,10 @@ def run_morning_prediction():
             
         df = calculate_technical_indicators(df)
         df['Return'] = df['Close'].pct_change()
-        
-        # ターゲットを「翌日の終値が当日より高いか（今日の予測）」に戻す
         df['Target'] = (df['Return'].shift(-1) > 0).astype(int)
+        
+        # 過去の履歴から得られた正解率を特徴量として各行に付与（自己フィードバック）
+        df['Historical_Success_Rate'] = ticker_success_rates.get(ticker, 0.5)
         
         if usdjpy_series is not None:
             df['USDJPY_Return'] = usdjpy_series
@@ -102,20 +118,22 @@ def run_morning_prediction():
     
     df_all = pd.concat(dfs).dropna()
     
-    feature_cols = ['SMA_5', 'SMA_20', 'BB_High', 'BB_Low', 'RSI', 'MACD', 'Return']
+    # 訓練に使う特徴量リストに履歴フィードバック項目を追加
+    feature_cols = ['SMA_5', 'SMA_20', 'BB_High', 'BB_Low', 'RSI', 'MACD', 'Return', 'Historical_Success_Rate']
     if 'USDJPY_Return' in df_all.columns:
         feature_cols.append('USDJPY_Return')
         
     X = df_all[feature_cols]
     y = df_all['Target']
     
+    # モデルの学習
     model = LGBMClassifier(random_state=42, verbose=-1)
     model.fit(X, y)
     joblib.dump(model, MODEL_PATH)
 
     today = datetime.now().strftime("%Y-%m-%d")
     predictions = []
-    mail_body = f"【株価予測レポート】({today})\n\nテクニカル指標・為替連動を反映した本日の予測です。\n\n"
+    mail_body = f"【自己学習型・株価予測レポート】({today})\n\n過去の検証履歴（ログ）を学習にフィードバックした本日の予測です。\n\n"
 
     for ticker, name in TICKER_DICT.items():
         latest_data = df_all[df_all['Ticker'] == ticker].tail(1)
@@ -128,7 +146,7 @@ def run_morning_prediction():
     df_new_log = pd.concat([df_log, pd.DataFrame(predictions)], ignore_index=True)
     df_new_log.to_csv(LOG_PATH, index=False)
 
-    send_email(f"【朝の株価予測】{today}", mail_body)
+    send_email(f"【朝の自己学習型予測】{today}", mail_body)
 
 if __name__ == "__main__":
     run_morning_prediction()
