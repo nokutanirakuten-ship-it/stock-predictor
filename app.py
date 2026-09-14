@@ -1,4 +1,23 @@
 import streamlit as st
+
+# アプリの基本設定（スマホ画面への最適化）
+st.set_page_config(
+    page_title="株価予測AIダッシュボード",
+    page_icon="📈",  # ホーム画面やタブに表示されるアイコン
+    layout="wide",
+    initial_sidebar_state="collapsed"  # スマホで見やすいようサイドバーを初期折りたたみ
+)
+
+# PWA風の表示を補強するカスタムHTML/CSS（全画面表示の最適化）
+st.markdown("""
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+""", unsafe_allow_allow_html=True)
+
+# --- 以下、既存のダッシュボード表示処理 ---
+
+import streamlit as st
 import pandas as pd
 import os
 
