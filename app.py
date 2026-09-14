@@ -1,26 +1,25 @@
 import os
+import json
+import base64
+import requests
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-# 1. ページ基本設定 & モバイル/PWA向けCSS最適化
+# 1. ページ基本設定
 st.set_page_config(
     page_title="AI株価予測",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
-# モダンアプリ風のカスタムスタイリング
 st.markdown("""
     <style>
-    /* 全体コンテナの幅調整 */
     .block-container {
         padding-top: 1.5rem;
         padding-bottom: 3rem;
         max-width: 680px;
     }
-    
-    /* カード型コンテナ */
     .stock-card {
         background: #ffffff;
         border: 1px solid #edf2f7;
@@ -29,8 +28,6 @@ st.markdown("""
         margin-bottom: 12px;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
     }
-    
-    /* 上昇・下落バッジ */
     .badge-up {
         background-color: #e6f4ea;
         color: #137333;
@@ -49,8 +46,6 @@ st.markdown("""
         font-size: 0.85rem;
         display: inline-block;
     }
-    
-    /* SHAP理由ボックス */
     .reason-box {
         background-color: #f8f9fa;
         border-left: 4px solid #4285f4;
@@ -65,27 +60,49 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 LOG_PATH = "data/history_log.csv"
+TICKER_JSON_PATH = "data/tickers.json"
 
-# 銘柄マッピング（9984.T などを登録）
-TICKER_NAMES = {
-    "7203.T": "トヨタ自動車",
-    "6758.T": "ソニーグループ",
-    "1928.T": "積水ハウス",
-    "5401.T": "日本製鉄",
-    "8411.T": "みずほFG",
-    "2503.T": "キリンHD",
-    "8031.T": "三井物産",
-    "8058.T": "三菱商事",
-    "9201.T": "日本航空 (JAL)",
-    "4901.T": "富士フイルムHD",
-    "6501.T": "日立製作所",
-    "8306.T": "三菱UFJ",
-    "9984.T": "ソフトバンクグループ"
-}
+def load_tickers():
+    if os.path.exists(TICKER_JSON_PATH):
+        with open(TICKER_JSON_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {
+        "7203.T": "トヨタ自動車",
+        "6758.T": "ソニーグループ"
+    }
+
+def save_tickers(tickers_dict):
+    os.makedirs("data", exist_ok=True)
+    with open(TICKER_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(tickers_dict, f, ensure_ascii=False, indent=2)
+        
+    # Streamlit CloudSecretsにGH_TOKENが設定されている場合、GitHubへも書き込み
+    gh_token = st.secrets.get("GH_TOKEN") or os.environ.get("GH_TOKEN")
+    repo = st.secrets.get("GH_REPO") or "nokutanirakuten-ship-it/stock-predictor"
+    
+    if gh_token:
+        try:
+            url = f"https://api.github.com/repos/{repo}/contents/{TICKER_JSON_PATH}"
+            headers = {"Authorization": f"token {gh_token}"}
+            res = requests.get(url, headers=headers).json()
+            sha = res.get("sha")
+            
+            content_str = json.dumps(tickers_dict, ensure_ascii=False, indent=2)
+            content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+            
+            payload = {
+                "message": "Update tickers.json via Streamlit App",
+                "content": content_b64,
+                "sha": sha
+            }
+            requests.put(url, headers=headers, json=payload)
+        except Exception:
+            pass
+
+TICKER_NAMES = load_tickers()
 
 @st.cache_data
 def get_company_name(ticker):
-    """辞書にない銘柄コードの場合でも自動で日本語/英語名を取得"""
     if ticker in TICKER_NAMES:
         return TICKER_NAMES[ticker]
     try:
@@ -109,17 +126,15 @@ if df_log.empty:
     st.info("現在ログデータは空です。")
     st.stop()
 
-# KeyError防止のための列自動補完
 for col in ['Actual', 'Result', 'Reason', 'Predicted']:
     if col not in df_log.columns:
         df_log[col] = None
 
-# 銘柄名の補完取得
 df_log['Ticker_Name'] = df_log['Ticker'].map(get_company_name)
 latest_date = df_log['Date'].max()
 
-# 3. タブ型ナビゲーション
-tab1, tab2, tab3 = st.tabs(["本日の予測", "勝率・分析", "過去ログ"])
+# 3. タブナビゲーション
+tab1, tab2, tab3, tab4 = st.tabs(["本日の予測", "勝率・分析", "過去ログ", "銘柄管理"])
 
 # --- TAB 1: 本日の予測 ---
 with tab1:
@@ -224,3 +239,53 @@ with tab3:
         use_container_width=True,
         hide_index=True
     )
+
+# --- TAB 4: 銘柄管理 ---
+with tab4:
+    st.subheader("監視銘柄の設定")
+    st.caption("ここで追加・削除した銘柄は、次回の自動予測処理から反映されます。")
+    
+    current_tickers = load_tickers()
+    
+    # 銘柄追加フォーム
+    with st.form("add_ticker_form"):
+        st.write("**新規銘柄の追加**")
+        col_code, col_name = st.columns(2)
+        with col_code:
+            new_code = st.text_input("銘柄コード (例: 6758.T)", placeholder="6758.T")
+        with col_name:
+            new_name = st.text_input("企業名 (例: ソニーグループ)", placeholder="ソニーグループ")
+            
+        submit_add = st.form_submit_button("銘柄を追加")
+        if submit_add:
+            if new_code and new_name:
+                formatted_code = new_code.strip()
+                if not formatted_code.endswith(".T") and formatted_code.isdigit():
+                    formatted_code += ".T"
+                current_tickers[formatted_code] = new_name.strip()
+                save_tickers(current_tickers)
+                st.success(f"追加しました: {new_name} ({formatted_code})")
+                st.rerun()
+            else:
+                st.error("銘柄コードと企業名の両方を入力してください。")
+                
+    st.markdown("---")
+    
+    # 現在の銘柄一覧と削除UI
+    st.write("**現在の監視銘柄一覧**")
+    tickers_to_delete = []
+    
+    for code, name in current_tickers.items():
+        col_info, col_del = st.columns([3, 1])
+        with col_info:
+            st.write(f"・ **{name}** ({code})")
+        with col_del:
+            if st.button("削除", key=f"del_{code}"):
+                tickers_to_delete.append(code)
+                
+    if tickers_to_delete:
+        for code in tickers_to_delete:
+            del current_tickers[code]
+        save_tickers(current_tickers)
+        st.success("指定された銘柄を削除しました。")
+        st.rerun()
