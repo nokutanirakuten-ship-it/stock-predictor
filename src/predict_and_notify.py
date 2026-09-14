@@ -1,4 +1,5 @@
 import os
+import json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -16,6 +17,7 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 MODEL_PATH = "data/model.pkl"
 LOG_PATH = "data/history_log.csv"
+TICKER_JSON_PATH = "data/tickers.json"
 
 # 予測ターゲットの閾値（0.005 = 翌日+0.5%以上の上昇を正例とする）
 RISE_THRESHOLD = 0.005
@@ -48,6 +50,9 @@ def send_email(subject, body):
     app_password = os.environ.get("MAIL_PASS")
     receiver_email = "nokutani.rakuten@gmail.com"
 
+    if not sender_email or not app_password:
+        return
+
     msg = MIMEMultipart()
     msg['Subject'] = subject
     msg['From'] = sender_email
@@ -59,34 +64,32 @@ def send_email(subject, body):
         server.send_message(msg)
 
 def dynamic_stock_screening():
-    # 候補となる代表的な優良株のプール（100株あたり20万〜30万円レンジを自動スクリーニング）
-    candidate_tickers = {
-        "7203.T": "トヨタ自動車", "6758.T": "ソニーグループ", 
-        "1928.T": "積水ハウス", "5401.T": "日本製鉄", 
-        "8411.T": "みずほフィナンシャルグループ", "2503.T": "キリンホールディングス", 
-        "8031.T": "三井物産", "8058.T": "三菱商事", 
-        "9201.T": "日本航空 (JAL)", "4901.T": "富士フイルムホールディングス",
-        "6501.T": "日立製作所", "8306.T": "三菱UFJフィナンシャル・グループ"
-    }
-    
-    selected_dict = {}
-    for ticker, name in candidate_tickers.items():
+    """data/tickers.json から設定された監視銘柄一覧を動的読み込み"""
+    if os.path.exists(TICKER_JSON_PATH):
         try:
-            df = yf.download(ticker, period="5d", progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            latest_close = df['Close'].iloc[-1]
-            
-            # 株価が2,000円〜3,000円の範囲内か判定
-            if 2000 <= latest_close <= 3000:
-                selected_dict[ticker] = name
+            with open(TICKER_JSON_PATH, "r", encoding="utf-8") as f:
+                candidate_tickers = json.load(f)
+                if candidate_tickers:
+                    return candidate_tickers
         except Exception:
-            continue
-            
-    if len(selected_dict) == 0:
-        selected_dict = {"7203.T": "トヨタ自動車", "6758.T": "ソニーグループ"}
-        
-    return dict(list(selected_dict.items())[:10])
+            pass
+
+    # ファイルが存在しない・読み込めない場合のデフォルト値
+    return {
+        "7203.T": "トヨタ自動車",
+        "6758.T": "ソニーグループ",
+        "1928.T": "積水ハウス",
+        "5401.T": "日本製鉄",
+        "8411.T": "みずほFG",
+        "2503.T": "キリンHD",
+        "8031.T": "三井物産",
+        "8058.T": "三菱商事",
+        "9201.T": "日本航空 (JAL)",
+        "4901.T": "富士フイルムHD",
+        "6501.T": "日立製作所",
+        "8306.T": "三菱UFJ",
+        "9984.T": "ソフトバンクグループ"
+    }
 
 def calculate_technical_indicators(df):
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
@@ -181,7 +184,6 @@ def get_prediction_reason(model, latest_data_row, feature_cols):
         contribs = model.booster_.predict(latest_data_row[feature_cols], pred_contrib=True)[0]
         feat_contribs = list(zip(feature_cols, contribs[:-1]))
         
-        # 影響度（絶対値）が大きい順にソート
         feat_contribs_sorted = sorted(feat_contribs, key=lambda x: abs(x[1]), reverse=True)
         top_features = feat_contribs_sorted[:3]
         
@@ -219,27 +221,35 @@ def run_morning_prediction():
 
     dfs = []
     for ticker in TICKER_DICT.keys():
-        df = yf.download(ticker, period="1y", progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-            
-        df = calculate_technical_indicators(df)
-        df['Return'] = df['Close'].pct_change()
-        
-        df['Target'] = (df['Return'].shift(-1) >= RISE_THRESHOLD).astype(int)
-        
-        if not df_macro.empty:
-            df = df.join(df_macro, how='left')
-            
-        pe, pbr, div_yield = fetch_ticker_fundamentals(ticker)
-        df['PER'] = pe
-        df['PBR'] = pbr
-        df['Div_Yield'] = div_yield
+        try:
+            df = yf.download(ticker, period="1y", progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+                
+            if df.empty:
+                continue
 
-        df['Historical_Error_Rate'] = error_penalties.get(ticker, 0.0)
-        df['Ticker'] = ticker
-        dfs.append(df)
+            df = calculate_technical_indicators(df)
+            df['Return'] = df['Close'].pct_change()
+            df['Target'] = (df['Return'].shift(-1) >= RISE_THRESHOLD).astype(int)
+            
+            if not df_macro.empty:
+                df = df.join(df_macro, how='left')
+                
+            pe, pbr, div_yield = fetch_ticker_fundamentals(ticker)
+            df['PER'] = pe
+            df['PBR'] = pbr
+            df['Div_Yield'] = div_yield
+
+            df['Historical_Error_Rate'] = error_penalties.get(ticker, 0.0)
+            df['Ticker'] = ticker
+            dfs.append(df)
+        except Exception:
+            continue
     
+    if not dfs:
+        return
+
     df_all = pd.concat(dfs).dropna()
     
     feature_cols = [
@@ -268,7 +278,6 @@ def run_morning_prediction():
             pred = int(model.predict(latest_data[feature_cols])[0])
             pred_text = "明確な上昇期待 (+0.5%以上)" if pred == 1 else "横ばい・下落懸念"
             
-            # Tree SHAPによる主要因子の可視化
             reason_hint = get_prediction_reason(model, latest_data, feature_cols)
             
             mail_body += f"・銘柄: {name} ({ticker}) -> 予測: {pred_text}\n  (判定制因: {reason_hint})\n\n"
