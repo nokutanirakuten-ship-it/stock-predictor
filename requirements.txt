@@ -4,3 +4,5 @@ yfinance
 scikit-learn
 lightgbm
 joblib
+optuna
+streamlit
