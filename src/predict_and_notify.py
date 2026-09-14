@@ -9,20 +9,6 @@ import yfinance as yf
 from lightgbm import LGBMClassifier
 import joblib
 
-# 銘柄コードと日本語銘柄名のマッピング（10銘柄）
-TICKER_DICT = {
-    "7203.T": "トヨタ自動車",
-    "6758.T": "ソニーグループ",
-    "1928.T": "積水ハウス",
-    "5401.T": "日本製鉄",
-    "8411.T": "みずほフィナンシャルグループ",
-    "2503.T": "キリンホールディングス",
-    "8031.T": "三井物産",
-    "8058.T": "三菱商事",
-    "9201.T": "日本航空 (JAL)",
-    "4901.T": "富士フイルムホールディングス"
-}
-
 MODEL_PATH = "data/model.pkl"
 LOG_PATH = "data/history_log.csv"
 
@@ -40,6 +26,37 @@ def send_email(subject, body):
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(sender_email, app_password)
         server.send_message(msg)
+
+def dynamic_stock_screening():
+    # 候補となる代表的な優良株のプール（100株あたり20万〜30万円レンジを自動スクリーニング）
+    candidate_tickers = {
+        "7203.T": "トヨタ自動車", "6758.T": "ソニーグループ", 
+        "1928.T": "積水ハウス", "5401.T": "日本製鉄", 
+        "8411.T": "みずほフィナンシャルグループ", "2503.T": "キリンホールディングス", 
+        "8031.T": "三井物産", "8058.T": "三菱商事", 
+        "9201.T": "日本航空 (JAL)", "4901.T": "富士フイルムホールディングス",
+        "6501.T": "日立製作所", "8306.T": "三菱UFJフィナンシャル・グループ"
+    }
+    
+    selected_dict = {}
+    for ticker, name in candidate_tickers.items():
+        try:
+            df = yf.download(ticker, period="5d", progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            latest_close = df['Close'].iloc[-1]
+            
+            # 株価が2,000円〜3,000円の範囲内か判定
+            if 2000 <= latest_close <= 3000:
+                selected_dict[ticker] = name
+        except Exception:
+            continue
+            
+    # 条件に合う銘柄がない場合のフォールバック
+    if len(selected_dict) == 0:
+        selected_dict = {"7203.T": "トヨタ自動車", "6758.T": "ソニーグループ"}
+        
+    return dict(list(selected_dict.items())[:10])
 
 def calculate_technical_indicators(df):
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
@@ -60,7 +77,6 @@ def calculate_technical_indicators(df):
     return df
 
 def fetch_macro_data():
-    """為替、米国株（S&P500）、米国債利回りのデータを取得"""
     macro_dfs = {}
     tickers_macro = {
         "USDJPY": "USDJPY=X",
@@ -79,23 +95,25 @@ def fetch_macro_data():
 
 def run_morning_prediction():
     os.makedirs("data", exist_ok=True)
+    
+    # 実行時の株価に応じた動的銘柄の取得
+    TICKER_DICT = dynamic_stock_screening()
+    
     if os.path.exists(LOG_PATH):
         df_log = pd.read_csv(LOG_PATH)
     else:
         df_log = pd.DataFrame(columns=["Date", "Ticker", "Predicted", "Actual", "Result", "Reason"])
 
-    # 過去の外れパターンから「ペナルティ補正値」を算出
     error_penalties = {}
     if not df_log.empty and 'Result' in df_log.columns:
         for ticker in TICKER_DICT.keys():
             t_df = df_log[df_log['Ticker'] == ticker].dropna(subset=['Result'])
             if len(t_df) > 0:
                 failure_rate = (t_df['Result'] == "外れ...").sum() / len(t_df)
-                error_penalties[ticker] = failure_rate # 外れ率が高いほど慎重に補正
+                error_penalties[ticker] = failure_rate
             else:
                 error_penalties[ticker] = 0.0
 
-    # マクロ経済データの取得
     df_macro = fetch_macro_data()
 
     dfs = []
@@ -108,19 +126,15 @@ def run_morning_prediction():
         df['Return'] = df['Close'].pct_change()
         df['Target'] = (df['Return'].shift(-1) > 0).astype(int)
         
-        # マクロデータを結合
         if not df_macro.empty:
             df = df.join(df_macro, how='left')
             
-        # 過去の外れ率を特徴量（リスクファクター）として付与
         df['Historical_Error_Rate'] = error_penalties.get(ticker, 0.0)
-        
         df['Ticker'] = ticker
         dfs.append(df)
     
     df_all = pd.concat(dfs).dropna()
     
-    # 特徴量カラムの定義（テクニカル ＋ 為替・米株・金利 ＋ エラー履歴）
     feature_cols = ['SMA_5', 'SMA_20', 'BB_High', 'BB_Low', 'RSI', 'MACD', 'Return', 'Historical_Error_Rate']
     for macro_col in ['USDJPY_Return', 'SP500_Return', 'US10Y_Return']:
         if macro_col in df_all.columns:
@@ -129,14 +143,13 @@ def run_morning_prediction():
     X = df_all[feature_cols]
     y = df_all['Target']
     
-    # モデル学習
     model = LGBMClassifier(random_state=42, verbose=-1)
     model.fit(X, y)
     joblib.dump(model, MODEL_PATH)
 
     today = datetime.now().strftime("%Y-%m-%d")
     predictions = []
-    mail_body = f"【経済指標統合・自己学習型予測】({today})\n\n米国株・金利・為替および過去の外れ要因を分析に反映した本日の予測です。\n\n"
+    mail_body = f"【動的スクリーニング・経済指標統合予測】({today})\n\n対象銘柄を自動選定し、マクロ環境と過去の予測エラーを反映した本日の予測です。\n\n"
 
     for ticker, name in TICKER_DICT.items():
         latest_data = df_all[df_all['Ticker'] == ticker].tail(1)
@@ -144,10 +157,8 @@ def run_morning_prediction():
             pred = int(model.predict(latest_data[feature_cols])[0])
             pred_text = "上がりそう (1)" if pred == 1 else "下がりそう (0)"
             
-            # 予測の根拠となる主要因を簡易判定
             latest_rsi = latest_data['RSI'].values[0]
-            macro_trend = "米株・為替連動"
-            reason_hint = f"RSI({latest_rsi:.1f})と{macro_trend}の傾向から判断"
+            reason_hint = f"RSI({latest_rsi:.1f})およびマクロ環境トレンドから算出"
             
             mail_body += f"・銘柄: {name} ({ticker}) -> 予測: {pred_text}\n  (根拠: {reason_hint})\n\n"
             predictions.append({
@@ -162,7 +173,7 @@ def run_morning_prediction():
     df_new_log = pd.concat([df_log, pd.DataFrame(predictions)], ignore_index=True)
     df_new_log.to_csv(LOG_PATH, index=False)
 
-    send_email(f"【朝の経済指標・自己学習予測】{today}", mail_body)
+    send_email(f"【朝の株価予測レポート】({today})", mail_body)
 
 if __name__ == "__main__":
     run_morning_prediction()
