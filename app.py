@@ -76,7 +76,6 @@ def save_tickers(tickers_dict):
     with open(TICKER_JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(tickers_dict, f, ensure_ascii=False, indent=2)
         
-    # Streamlit CloudSecretsにGH_TOKENが設定されている場合、GitHubへも書き込み
     gh_token = st.secrets.get("GH_TOKEN") or os.environ.get("GH_TOKEN")
     repo = st.secrets.get("GH_REPO") or "nokutanirakuten-ship-it/stock-predictor"
     
@@ -98,6 +97,39 @@ def save_tickers(tickers_dict):
             requests.put(url, headers=headers, json=payload)
         except Exception:
             pass
+
+def search_stock_candidates(query):
+    """入力されたキーワードから日本株の候補リストを取得"""
+    candidates = {}
+    if not query:
+        return candidates
+        
+    query_str = str(query).strip()
+    
+    # 4桁数値コード直接入力時のショートカット（例: 7203）
+    if query_str.isdigit() and len(query_str) == 4:
+        symbol = f"{query_str}.T"
+        try:
+            info = yf.Ticker(symbol).info
+            name = info.get('shortName') or info.get('longName') or symbol
+            candidates[symbol] = name
+        except Exception:
+            candidates[symbol] = f"銘柄コード {symbol}"
+            
+    # yfinance の Search API によるあいまい検索
+    try:
+        search_res = yf.Search(query_str, max_results=8)
+        quotes = getattr(search_res, 'quotes', [])
+        for q in quotes:
+            symbol = q.get('symbol', '')
+            name = q.get('shortname') or q.get('longname') or symbol
+            # 東証銘柄 (.T) のみに絞り込み
+            if symbol.endswith('.T'):
+                candidates[symbol] = name
+    except Exception:
+        pass
+        
+    return candidates
 
 TICKER_NAMES = load_tickers()
 
@@ -243,35 +275,32 @@ with tab3:
 # --- TAB 4: 銘柄管理 ---
 with tab4:
     st.subheader("監視銘柄の設定")
-    st.caption("ここで追加・削除した銘柄は、次回の自動予測処理から反映されます。")
+    st.caption("キーワード入力で候補が表示されます。追加した銘柄は次回の自動予測から反映されます。")
     
     current_tickers = load_tickers()
     
-    # 銘柄追加フォーム
-    with st.form("add_ticker_form"):
-        st.write("**新規銘柄の追加**")
-        col_code, col_name = st.columns(2)
-        with col_code:
-            new_code = st.text_input("銘柄コード (例: 6758.T)", placeholder="6758.T")
-        with col_name:
-            new_name = st.text_input("企業名 (例: ソニーグループ)", placeholder="ソニーグループ")
+    st.write("**新規銘柄の検索・追加**")
+    search_kw = st.text_input("銘柄名またはコードを入力 (例: トヨタ, 7203, 任天堂)", key="search_kw")
+    
+    if search_kw:
+        candidates = search_stock_candidates(search_kw)
+        if candidates:
+            options = [f"{name} ({code})" for code, name in candidates.items()]
+            selected_option = st.selectbox("候補から選択してください", options)
             
-        submit_add = st.form_submit_button("銘柄を追加")
-        if submit_add:
-            if new_code and new_name:
-                formatted_code = new_code.strip()
-                if not formatted_code.endswith(".T") and formatted_code.isdigit():
-                    formatted_code += ".T"
-                current_tickers[formatted_code] = new_name.strip()
-                save_tickers(current_tickers)
-                st.success(f"追加しました: {new_name} ({formatted_code})")
-                st.rerun()
-            else:
-                st.error("銘柄コードと企業名の両方を入力してください。")
+            if st.button("選択した銘柄を追加"):
+                selected_code = selected_option.split("(")[-1].replace(")", "").strip()
+                selected_name = candidates[selected_code]
                 
+                current_tickers[selected_code] = selected_name
+                save_tickers(current_tickers)
+                st.success(f"追加しました: {selected_name} ({selected_code})")
+                st.rerun()
+        else:
+            st.warning("該当する銘柄が見つかりませんでした。4桁の銘柄コード（例: 7203）でお試しください。")
+            
     st.markdown("---")
     
-    # 現在の銘柄一覧と削除UI
     st.write("**現在の監視銘柄一覧**")
     tickers_to_delete = []
     
