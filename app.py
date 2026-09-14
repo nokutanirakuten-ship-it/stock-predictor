@@ -2,28 +2,72 @@ import os
 import pandas as pd
 import streamlit as st
 
-# 1. ページ基本設定（モバイル・PWA表示に最適化）
+# ---------------------------------------------------------
+# 1. ページ基本設定 & モバイル/PWA向けCSS最適化
+# ---------------------------------------------------------
 st.set_page_config(
-    page_title="株価予測AIダッシュボード",
+    page_title="AI株価予測",
     page_icon="📈",
-    layout="wide",
+    layout="centered",  # スマホ画面に最適なセンタリング表示
     initial_sidebar_state="collapsed"
 )
 
-# PWA風全画面表示用のメタタグ挿入（タイポ修正箇所）
+# モダンアプリ風のカスタムスタイリング
 st.markdown("""
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <style>
+    /* 全体コンテナの幅調整 */
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 3rem;
+        max-width: 680px;
+    }
+    
+    /* カード型コンテナ */
+    .stock-card {
+        background: #ffffff;
+        border: 1px solid #edf2f7;
+        border-radius: 16px;
+        padding: 16px 20px;
+        margin-bottom: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03);
+    }
+    
+    /* 上昇・下落バッジ */
+    .badge-up {
+        background-color: #e6f4ea;
+        color: #137333;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 0.85rem;
+        display: inline-block;
+    }
+    .badge-down {
+        background-color: #f1f3f4;
+        color: #5f6368;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-weight: 700;
+        font-size: 0.85rem;
+        display: inline-block;
+    }
+    
+    /* SHAP理由ボックス */
+    .reason-box {
+        background-color: #f8f9fa;
+        border-left: 4px solid #4285f4;
+        padding: 10px 14px;
+        font-size: 0.85rem;
+        color: #3c4043;
+        border-radius: 0 8px 8px 0;
+        margin-top: 10px;
+        line-height: 1.5;
+    }
+    </style>
 """, unsafe_allow_html=True)
-
-# 2. ヘッダー表示
-st.title("📈 日本株 AI予測ダッシュボード")
-st.caption("LightGBM + Optuna + Tree SHAP による翌日株価予測システム")
 
 LOG_PATH = "data/history_log.csv"
 
-# 銘柄名マッピング
 TICKER_NAMES = {
     "7203.T": "トヨタ自動車",
     "6758.T": "ソニーグループ",
@@ -39,71 +83,128 @@ TICKER_NAMES = {
     "8306.T": "三菱UFJ"
 }
 
-# 3. データ読み込みとダッシュボード構築
-if os.path.exists(LOG_PATH):
-    df_log = pd.read_csv(LOG_PATH)
+# ---------------------------------------------------------
+# 2. アプリヘッダー
+# ---------------------------------------------------------
+st.title("📈 AI株価予測")
+st.caption("LightGBM × Optuna × SHAP 解析モデル")
+
+if not os.path.exists(LOG_PATH):
+    st.warning("⚠️ 予測データが見つかりません。")
+    st.info("毎朝の自動バッチ処理が完了すると、最新データがここに反映されます。")
+    st.stop()
+
+df_log = pd.read_csv(LOG_PATH)
+if df_log.empty:
+    st.info("現在ログデータは空です。")
+    st.stop()
+
+df_log['Ticker_Name'] = df_log['Ticker'].map(lambda x: TICKER_NAMES.get(x, x))
+latest_date = df_log['Date'].max()
+
+# ---------------------------------------------------------
+# 3. タブ型ナビゲーション（UX最適化）
+# ---------------------------------------------------------
+tab1, tab2, tab3 = st.tabs(["🔥 本日の予測", "📊 勝率・分析", "📜 過去ログ"])
+
+# --- TAB 1: 本日の予測 ---
+with tab1:
+    st.caption(f"最終更新: {latest_date}")
+    df_latest = df_log[df_log['Date'] == latest_date].copy()
     
-    if not df_log.empty:
-        # 銘柄名の補完
-        df_log['Ticker_Name'] = df_log['Ticker'].map(lambda x: f"{TICKER_NAMES.get(x, x)} ({x})")
+    # 注目（上昇予測）の銘柄数をカウント
+    up_count = (df_latest['Predicted'] == 1).sum()
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.metric("本日シグナル対象", f"{len(df_latest)} 銘柄")
+    with col_b:
+        st.metric("上昇期待銘柄", f"{up_count} 銘柄")
         
-        # --- パフォーマンス概要（メトリクス） ---
-        st.subheader("📊 予測パフォーマンス概要")
+    st.markdown("---")
+    
+    for _, row in df_latest.iterrows():
+        is_up = row['Predicted'] == 1
+        badge_html = '<span class="badge-up">🚀 上昇期待 (+0.5%↑)</span>' if is_up else '<span class="badge-down">➡️ 静観 / 静かな推移</span>'
+        reason = row.get('Reason', '解析データなし')
         
-        df_evaluated = df_log.dropna(subset=['Result'])
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("累計予測件数", f"{len(df_log)} 件")
-        with col2:
-            if not df_evaluated.empty:
-                win_count = (df_evaluated['Result'] == "的中！").sum()
-                win_rate = (win_count / len(df_evaluated)) * 100
-                st.metric("予測的中率", f"{win_rate:.1f} %")
-            else:
-                st.metric("予測的中率", "検証中...")
-        with col3:
-            latest_date = df_log['Date'].max()
-            st.metric("最新予測日", str(latest_date))
-            
-        st.divider()
+        st.markdown(f"""
+            <div class="stock-card">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: #1a73e8;">
+                        {row['Ticker_Name']} <span style="font-size: 0.8rem; color: #70757a; font-weight: normal;">({row['Ticker']})</span>
+                    </h3>
+                    {badge_html}
+                </div>
+                <div class="reason-box">
+                    <strong>💡 判断根拠:</strong><br>{reason}
+                </div>
+            </div>
+        """, unsafe_allow_html=True)
 
-        # --- 最新の予測結果 ---
-        st.subheader(f"📅 最新予測結果 ({latest_date})")
-        df_latest = df_log[df_log['Date'] == latest_date].copy()
-        
-        for _, row in df_latest.iterrows():
-            is_up = row['Predicted'] == 1
-            pred_label = "🚀 明確な上昇期待 (+0.5%以上)" if is_up else "➡️ 横ばい・下落懸念"
-            
-            with st.expander(f"**{row['Ticker_Name']}** ： {pred_label}", expanded=True):
-                st.write(f"**判定理由 (SHAP分析)**: {row.get('Reason', '解析中')}")
-                if pd.notna(row.get('Result')):
-                    st.write(f"**検証結果**: {row['Result']} (実績騰落: {row.get('Actual', '-')})")
-
-        st.divider()
-
-        # --- 予測・検証履歴ログ ---
-        st.subheader("📜 過去の予測ログ")
-        
-        tickers_list = ["すべて"] + list(df_log['Ticker_Name'].unique())
-        selected_ticker = st.selectbox("銘柄絞り込み", tickers_list)
-        
-        if selected_ticker != "すべて":
-            display_df = df_log[df_log['Ticker_Name'] == selected_ticker]
-        else:
-            display_df = df_log
-            
-        display_cols = ["Date", "Ticker_Name", "Predicted", "Actual", "Result", "Reason"]
-        existing_cols = [c for c in display_cols if c in display_df.columns]
-        
-        st.dataframe(
-            display_df[existing_cols].sort_values(by="Date", ascending=False),
-            use_container_width=True,
-            hide_index=True
-        )
+# --- TAB 2: 勝率・分析 ---
+with tab2:
+    st.subheader("🎯 モデル精度評価")
+    df_eval = df_log.dropna(subset=['Result']).copy()
+    
+    if df_eval.empty:
+        st.info("※ 予測結果の答え合わせデータが集計されるまでお待ちください。")
     else:
-        st.info("予測履歴データ (`data/history_log.csv`) は存在しますが、まだデータが記録されていません。")
-else:
-    st.warning("⚠️ 予測履歴データ (`data/history_log.csv`) がまだ見つかりません。")
-    st.info("GitHub Actions による朝の自動予測処理が完了すると、ここに最新結果が表示されます。")
+        win_count = (df_eval['Result'] == "的中！").sum()
+        total_count = len(df_eval)
+        win_rate = (win_count / total_count) * 100
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("総検証数", f"{total_count} 件")
+        m2.metric("的中数", f"{win_count} 件")
+        m3.metric("通算勝率", f"{win_rate:.1f} %")
+        
+        st.markdown("---")
+        st.write("**銘柄別の勝率内訳**")
+        
+        ticker_stats = []
+        for ticker, name in TICKER_NAMES.items():
+            t_df = df_eval[df_eval['Ticker'] == ticker]
+            if len(t_df) > 0:
+                t_wins = (t_df['Result'] == "的中！").sum()
+                t_rate = (t_wins / len(t_df)) * 100
+                ticker_stats.append({
+                    "銘柄名": name,
+                    "コード": ticker,
+                    "検証数": len(t_df),
+                    "的中率": f"{t_rate:.1f}%"
+                })
+        
+        if ticker_stats:
+            st.dataframe(pd.DataFrame(ticker_stats), use_container_width=True, hide_index=True)
+
+# --- TAB 3: 過去ログ ---
+with tab3:
+    st.subheader("📜 予測・結果データ一覧")
+    
+    # フィルターUI
+    selected_ticker = st.selectbox(
+        "銘柄絞り込み", 
+        ["すべての銘柄"] + list(df_log['Ticker_Name'].unique())
+    )
+    
+    df_display = df_log.copy()
+    if selected_ticker != "すべての銘柄":
+        df_display = df_display[df_display['Ticker_Name'] == selected_ticker]
+        
+    # テーブル表示用の整形
+    df_display['予測'] = df_display['Predicted'].map({1: "🚀 上昇", 0: "➡️ 静観"})
+    df_table = df_display[['Date', 'Ticker_Name', '予測', 'Actual', 'Result', 'Reason']].sort_values(by="Date", ascending=False)
+    
+    st.dataframe(
+        df_table,
+        column_config={
+            "Date": "日付",
+            "Ticker_Name": "銘柄名",
+            "Actual": "実績騰落率",
+            "Result": "判定",
+            "Reason": "SHAP分析根拠"
+        },
+        use_container_width=True,
+        hide_index=True
+    )
