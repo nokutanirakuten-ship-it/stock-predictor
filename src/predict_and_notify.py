@@ -64,11 +64,17 @@ def send_email(subject, body):
         server.send_message(msg)
 
 def dynamic_stock_screening():
-    """data/tickers.json から設定された監視銘柄一覧を動的読み込み"""
+    """data/tickers.json から設定された監視銘柄一覧を動的読み込み（新旧フォーマット両対応）"""
     if os.path.exists(TICKER_JSON_PATH):
         try:
             with open(TICKER_JSON_PATH, "r", encoding="utf-8") as f:
-                candidate_tickers = json.load(f)
+                raw_data = json.load(f)
+                candidate_tickers = {}
+                for code, meta in raw_data.items():
+                    if isinstance(meta, dict):
+                        candidate_tickers[code] = meta.get("name", code)
+                    else:
+                        candidate_tickers[code] = str(meta)
                 if candidate_tickers:
                     return candidate_tickers
         except Exception:
