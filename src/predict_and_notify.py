@@ -20,6 +20,29 @@ LOG_PATH = "data/history_log.csv"
 # 予測ターゲットの閾値（0.005 = 翌日+0.5%以上の上昇を正例とする）
 RISE_THRESHOLD = 0.005
 
+# 予測理由可視化用の日本語ラベルマップ
+FEATURE_NAME_MAP = {
+    'SMA_5': '5日移動平均',
+    'SMA_20': '20日移動平均',
+    'BB_High': 'ボリンジャー上限',
+    'BB_Low': 'ボリンジャー下限',
+    'RSI': 'RSI',
+    'MACD': 'MACD',
+    'Return': '前日騰落率',
+    'Vol_Ratio': '出来高倍率',
+    'ATR': 'ATR(ボラティリティ)',
+    'PER': 'PER',
+    'PBR': 'PBR',
+    'Div_Yield': '配当利回り',
+    'Historical_Error_Rate': '過去予測エラー率',
+    'USDJPY_Return': 'ドル円変動率',
+    'SP500_Return': 'S&P500変動率',
+    'US10Y_Return': '米10年債利回り変動率',
+    'N225_Return': '日経平均変動率',
+    'VIX_Close': 'VIX指数',
+    'VIX_Return': 'VIX変動率'
+}
+
 def send_email(subject, body):
     sender_email = os.environ.get("MAIL_USER")
     app_password = os.environ.get("MAIL_PASS")
@@ -66,7 +89,6 @@ def dynamic_stock_screening():
     return dict(list(selected_dict.items())[:10])
 
 def calculate_technical_indicators(df):
-    # テクニカル指標
     df['SMA_5'] = df['Close'].rolling(window=5).mean()
     df['SMA_20'] = df['Close'].rolling(window=20).mean()
     std_20 = df['Close'].rolling(window=20).std()
@@ -83,22 +105,20 @@ def calculate_technical_indicators(df):
     exp2 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp1 - exp2
 
-    # 需給・ボラティリティ指標（出来高急増検知・日中値幅率）
     df['Vol_SMA_20'] = df['Volume'].rolling(window=20).mean()
-    df['Vol_Ratio'] = df['Volume'] / (df['Vol_SMA_20'] + 1e-5) # 出来高倍率（需給の変化）
-    df['ATR'] = (df['High'] - df['Low']) / df['Close']          # ボラティリティ指標
+    df['Vol_Ratio'] = df['Volume'] / (df['Vol_SMA_20'] + 1e-5)
+    df['ATR'] = (df['High'] - df['Low']) / df['Close']
 
     return df
 
 def fetch_macro_data():
-    """米国株・為替に加え、国内マクロ（日経平均）とボラティリティ（VIX）を取得"""
     macro_dfs = {}
     tickers_macro = {
         "USDJPY": "USDJPY=X",
         "SP500": "^GSPC",
         "US10Y": "^TNX",
-        "N225": "^N225",  # 国内マクロ（日経平均）
-        "VIX": "^VIX"      # ボラティリティ指標（恐怖指数）
+        "N225": "^N225",
+        "VIX": "^VIX"
     }
     for key, t_symbol in tickers_macro.items():
         try:
@@ -116,7 +136,6 @@ def fetch_macro_data():
     return pd.DataFrame(macro_dfs)
 
 def fetch_ticker_fundamentals(ticker):
-    """銘柄ごとのファンダメンタルズ指標（PER, PBR, 配当利回り）を取得"""
     try:
         t = yf.Ticker(ticker)
         info = t.info
@@ -128,7 +147,6 @@ def fetch_ticker_fundamentals(ticker):
         return 0.0, 0.0, 0.0
 
 def optimize_hyperparameters(X, y):
-    """Optunaによる時系列交差検証ベースのハイパーパラメータ自動最適化"""
     def objective(trial):
         params = {
             'objective': 'binary',
@@ -156,6 +174,26 @@ def optimize_hyperparameters(X, y):
     best_params['random_state'] = 42
     best_params['verbose'] = -1
     return best_params
+
+def get_prediction_reason(model, latest_data_row, feature_cols):
+    """Tree SHAP値を用いて、その日の予測結果に寄与した特徴量TOP3とその影響方向を算出"""
+    try:
+        contribs = model.booster_.predict(latest_data_row[feature_cols], pred_contrib=True)[0]
+        feat_contribs = list(zip(feature_cols, contribs[:-1]))
+        
+        # 影響度（絶対値）が大きい順にソート
+        feat_contribs_sorted = sorted(feat_contribs, key=lambda x: abs(x[1]), reverse=True)
+        top_features = feat_contribs_sorted[:3]
+        
+        reasons = []
+        for feat, val in top_features:
+            disp_name = FEATURE_NAME_MAP.get(feat, feat)
+            direction = "上昇寄与" if val > 0 else "下落寄与"
+            reasons.append(f"{disp_name}({direction}: {val:+.2f})")
+            
+        return " / ".join(reasons)
+    except Exception:
+        return "モデル総合判断"
 
 def run_morning_prediction():
     os.makedirs("data", exist_ok=True)
@@ -188,14 +226,11 @@ def run_morning_prediction():
         df = calculate_technical_indicators(df)
         df['Return'] = df['Close'].pct_change()
         
-        # 目的変数（翌日+0.5%以上上昇で正例）
         df['Target'] = (df['Return'].shift(-1) >= RISE_THRESHOLD).astype(int)
         
-        # マクロ・ボラティリティデータの結合
         if not df_macro.empty:
             df = df.join(df_macro, how='left')
             
-        # ファンダメンタルズ指標の追加
         pe, pbr, div_yield = fetch_ticker_fundamentals(ticker)
         df['PER'] = pe
         df['PBR'] = pbr
@@ -207,7 +242,6 @@ def run_morning_prediction():
     
     df_all = pd.concat(dfs).dropna()
     
-    # 特徴量カラムの構成
     feature_cols = [
         'SMA_5', 'SMA_20', 'BB_High', 'BB_Low', 'RSI', 'MACD', 'Return',
         'Vol_Ratio', 'ATR', 'PER', 'PBR', 'Div_Yield', 'Historical_Error_Rate'
@@ -219,7 +253,6 @@ def run_morning_prediction():
     X = df_all[feature_cols]
     y = df_all['Target']
     
-    # Optunaによる自動ハイパーパラメータ最適化とモデル構築
     best_params = optimize_hyperparameters(X, y)
     model = LGBMClassifier(**best_params)
     model.fit(X, y)
@@ -227,7 +260,7 @@ def run_morning_prediction():
 
     today = datetime.now().strftime("%Y-%m-%d")
     predictions = []
-    mail_body = f"【フルスペック高度株価予測レポート】({today})\n\n国内マクロ・VIX・需給・ファンダメンタルズ指標をフル統合し、Optuna最適化を適用した本日の予測です。\n\n"
+    mail_body = f"【予測理由可視化・高度分析レポート】({today})\n\n各銘柄の判定において影響を与えた主要因子（SHAP算出）を添えた本日の予測結果です。\n\n"
 
     for ticker, name in TICKER_DICT.items():
         latest_data = df_all[df_all['Ticker'] == ticker].tail(1)
@@ -235,11 +268,10 @@ def run_morning_prediction():
             pred = int(model.predict(latest_data[feature_cols])[0])
             pred_text = "明確な上昇期待 (+0.5%以上)" if pred == 1 else "横ばい・下落懸念"
             
-            latest_rsi = latest_data['RSI'].values[0]
-            latest_vol_ratio = latest_data['Vol_Ratio'].values[0]
-            reason_hint = f"RSI({latest_rsi:.1f})・出来高倍率({latest_vol_ratio:.1f}倍)・マクロ/VIX/ファンダメンタル統合判断"
+            # Tree SHAPによる主要因子の可視化
+            reason_hint = get_prediction_reason(model, latest_data, feature_cols)
             
-            mail_body += f"・銘柄: {name} ({ticker}) -> 予測: {pred_text}\n  (根拠: {reason_hint})\n\n"
+            mail_body += f"・銘柄: {name} ({ticker}) -> 予測: {pred_text}\n  (判定制因: {reason_hint})\n\n"
             predictions.append({
                 "Date": today, 
                 "Ticker": ticker, 
