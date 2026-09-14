@@ -7,10 +7,18 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from lightgbm import LGBMClassifier
+import optuna
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 import joblib
+
+# Optunaのログ出力を抑制してGitHub Actionsのログを綺麗に保つ
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 MODEL_PATH = "data/model.pkl"
 LOG_PATH = "data/history_log.csv"
+
+# 予測ターゲットの閾値（0.005 = 翌日+0.5%以上の上昇を正例とする）
+RISE_THRESHOLD = 0.005
 
 def send_email(subject, body):
     sender_email = os.environ.get("MAIL_USER")
@@ -52,7 +60,6 @@ def dynamic_stock_screening():
         except Exception:
             continue
             
-    # 条件に合う銘柄がない場合のフォールバック
     if len(selected_dict) == 0:
         selected_dict = {"7203.T": "トヨタ自動車", "6758.T": "ソニーグループ"}
         
@@ -93,10 +100,39 @@ def fetch_macro_data():
             pass
     return pd.DataFrame(macro_dfs)
 
+def optimize_hyperparameters(X, y):
+    """Optunaによる時系列交差検証ベースのハイパーパラメータ自動最適化"""
+    def objective(trial):
+        params = {
+            'objective': 'binary',
+            'metric': 'binary_logloss',
+            'boosting_type': 'gbdt',
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2, log=True),
+            'num_leaves': trial.suggest_int('num_leaves', 15, 63),
+            'max_depth': trial.suggest_int('max_depth', 3, 10),
+            'min_child_samples': trial.suggest_int('min_child_samples', 5, 30),
+            'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+            'random_state': 42,
+            'verbose': -1
+        }
+        
+        tscv = TimeSeriesSplit(n_splits=3)
+        model = LGBMClassifier(**params)
+        scores = cross_val_score(model, X, y, cv=tscv, scoring='accuracy')
+        return scores.mean()
+
+    study = optuna.create_study(direction='maximize')
+    study.optimize(objective, n_trials=20)
+    
+    best_params = study.best_params
+    best_params['random_state'] = 42
+    best_params['verbose'] = -1
+    return best_params
+
 def run_morning_prediction():
     os.makedirs("data", exist_ok=True)
     
-    # 実行時の株価に応じた動的銘柄の取得
     TICKER_DICT = dynamic_stock_screening()
     
     if os.path.exists(LOG_PATH):
@@ -124,7 +160,9 @@ def run_morning_prediction():
             
         df = calculate_technical_indicators(df)
         df['Return'] = df['Close'].pct_change()
-        df['Target'] = (df['Return'].shift(-1) > 0).astype(int)
+        
+        # 【目的変数の厳格化】翌日の上昇率が+0.5%以上の場合のみ1（正例）とする
+        df['Target'] = (df['Return'].shift(-1) >= RISE_THRESHOLD).astype(int)
         
         if not df_macro.empty:
             df = df.join(df_macro, how='left')
@@ -143,22 +181,24 @@ def run_morning_prediction():
     X = df_all[feature_cols]
     y = df_all['Target']
     
-    model = LGBMClassifier(random_state=42, verbose=-1)
+    # 【ハイパーパラメータ自動最適化】Optunaでベストなパラメータを探索・学習
+    best_params = optimize_hyperparameters(X, y)
+    model = LGBMClassifier(**best_params)
     model.fit(X, y)
     joblib.dump(model, MODEL_PATH)
 
     today = datetime.now().strftime("%Y-%m-%d")
     predictions = []
-    mail_body = f"【動的スクリーニング・経済指標統合予測】({today})\n\n対象銘柄を自動選定し、マクロ環境と過去の予測エラーを反映した本日の予測です。\n\n"
+    mail_body = f"【最適化・高精度予測レポート】({today})\n\nOptuna自動最適化および目標上昇率(+0.5%以上)の厳格基準を適用した本日の予測です。\n\n"
 
     for ticker, name in TICKER_DICT.items():
         latest_data = df_all[df_all['Ticker'] == ticker].tail(1)
         if not latest_data.empty:
             pred = int(model.predict(latest_data[feature_cols])[0])
-            pred_text = "上がりそう (1)" if pred == 1 else "下がりそう (0)"
+            pred_text = "明確な上昇期待 (+0.5%以上)" if pred == 1 else "横ばい・下落懸念"
             
             latest_rsi = latest_data['RSI'].values[0]
-            reason_hint = f"RSI({latest_rsi:.1f})およびマクロ環境トレンドから算出"
+            reason_hint = f"RSI({latest_rsi:.1f})・Optuna最適化モデルの総合判断"
             
             mail_body += f"・銘柄: {name} ({ticker}) -> 予測: {pred_text}\n  (根拠: {reason_hint})\n\n"
             predictions.append({
